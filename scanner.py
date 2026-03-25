@@ -1,172 +1,224 @@
-import streamlit as st
+# scanner.py
+from pathlib import Path
+import traceback
+import time
+import pandas as pd
 
-st.set_page_config(page_title="金首饰利润率计算器", page_icon="💰", layout="wide")
+# =========================
+# 基础路径
+# =========================
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "output"
 
-st.title("💰 金首饰利润率计算器")
-st.caption("适用于金首饰销售报价、成本核算、利润与利润率计算")
+CODE_FILE = DATA_DIR / "a_share_codes_for_akshare.csv"
+ST_FILE = DATA_DIR / "st_stocks.csv"
 
-# -----------------------------
-# 固定参数
-# -----------------------------
-SALES_SHIPPING = 15          # 销售运费
-COST_SHIPPING = 13           # 运费成本价
-SALES_CERT_FEE = 5           # 证书销售费
-COST_CERT_FEE = 4            # 证书成本价
-COST_LABOR_PER_G = 20        # 成本手工费/克
+OUTPUT_DIR.mkdir(exist_ok=True)
 
-SILVER_CHAIN_COST = 33
-SILVER_CHAIN_SALE = 59
+RESULT_FILE = OUTPUT_DIR / "result.csv"
+FAILED_FILE = OUTPUT_DIR / "failed_symbols.csv"
+LOG_FILE = OUTPUT_DIR / "run_log.txt"
+SUMMARY_FILE = OUTPUT_DIR / "summary.txt"
 
-CRAFT_OPTIONS = {
-    "珐琅": 105,
-    "素金": 95,
-    "钻石": 115
-}
+# =========================
+# 测试数量
+# 第一次在 GitHub 上先只跑 100 只
+# =========================
+TEST_LIMIT = 100
 
-# -----------------------------
-# 输入区
-# -----------------------------
-st.subheader("基础信息")
+# =========================
+# 日志函数
+# =========================
+def log(msg):
+    text = str(msg)
+    print(text, flush=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(text + "\n")
 
-col1, col2, col3 = st.columns(3)
+# =========================
+# 读取 ST 股票列表
+# 兼容常见列名：ticker / symbol / secID
+# 最终统一转成 6 位代码集合
+# =========================
+def load_st_symbols():
+    if not ST_FILE.exists():
+        log(f"[警告] ST 文件不存在：{ST_FILE}")
+        return set()
 
-with col1:
-    weight = st.number_input("克重（g）", min_value=0.0, value=1.0, step=0.01)
-    category = st.selectbox("品种", ["珐琅", "素金", "钻石"])
+    df = pd.read_csv(ST_FILE)
+    if df.empty:
+        log("[警告] ST 文件为空")
+        return set()
 
-with col2:
-    sale_gold_price_per_g = st.number_input("销售金价 / 克（元）", min_value=0.0, value=800.0, step=1.0)
-    cost_gold_price_per_g = st.number_input("成本金价 / 克（元）", min_value=0.0, value=700.0, step=1.0)
+    possible_cols = ["ticker", "symbol", "secID", "code"]
+    use_col = None
+    for col in possible_cols:
+        if col in df.columns:
+            use_col = col
+            break
 
-with col3:
-    tax_rate_percent = st.number_input("税率（输入 5 表示 5%）", min_value=0.0, value=5.0, step=0.1)
+    if use_col is None:
+        raise ValueError(
+            f"ST 文件中未找到可识别列，当前列为：{list(df.columns)}"
+        )
 
-st.subheader("配件选择")
+    s = df[use_col].astype(str).str.strip()
 
-col4, col5 = st.columns(2)
-
-with col4:
-    use_silver_chain = st.checkbox("是否选择银链", value=False)
-
-with col5:
-    use_braided_rope = st.checkbox("是否选择编绳", value=False)
-
-braid_cost = 0
-braid_sale = 0
-
-if use_braided_rope:
-    braid_option = st.radio(
-        "请选择编绳档位",
-        ["成本15 / 售价30", "成本20 / 售价40"],
-        horizontal=True
-    )
-    if braid_option == "成本15 / 售价30":
-        braid_cost = 15
-        braid_sale = 30
-    else:
-        braid_cost = 20
-        braid_sale = 40
-
-silver_chain_cost = SILVER_CHAIN_COST if use_silver_chain else 0
-silver_chain_sale = SILVER_CHAIN_SALE if use_silver_chain else 0
-
-# -----------------------------
-# 计算区
-# -----------------------------
-tax_rate = tax_rate_percent / 100.0
-sale_labor_per_g = CRAFT_OPTIONS[category]
-
-sale_gold_total = sale_gold_price_per_g * weight
-cost_gold_total = cost_gold_price_per_g * weight
-
-sale_labor_total = sale_labor_per_g * weight
-cost_labor_total = COST_LABOR_PER_G * weight
-
-# 未税销售合计
-untaxed_sale_total = (
-    sale_gold_total
-    + sale_labor_total
-    + SALES_SHIPPING
-    + SALES_CERT_FEE
-    + silver_chain_sale
-    + braid_sale
-)
-
-# 根据你确认的规则：
-# 税费 = 总销售价 × 税率
-# 总销售价 = 未税销售合计 + 税费
-# => 总销售价 = 未税销售合计 / (1 - 税率)
-if tax_rate >= 1:
-    st.error("税率不能大于或等于 100%，请重新输入。")
-else:
-    total_sale_price = untaxed_sale_total / (1 - tax_rate)
-    tax_fee = total_sale_price * tax_rate
-
-    # 总成本（按你的业务口径，把同一税费纳入成本展示）
-    total_cost = (
-        cost_gold_total
-        + cost_labor_total
-        + COST_SHIPPING
-        + COST_CERT_FEE
-        + silver_chain_cost
-        + braid_cost
-        + tax_fee
+    # secID 例如 000004.XSHE
+    # symbol 例如 sz000004 / sh600000
+    # ticker 例如 000004
+    code6 = (
+        s.str.extract(r"(\d{6})", expand=False)
+         .dropna()
+         .astype(str)
+         .str.zfill(6)
     )
 
-    profit = total_sale_price - total_cost
+    st_codes = set(code6.tolist())
+    log(f"ST 股票数量：{len(st_codes)}")
+    return st_codes
 
-    if total_cost == 0:
-        profit_rate = 0
-    else:
-        profit_rate = profit / total_cost
+# =========================
+# 从股票池 CSV 里读取 universe
+# 要求至少有 symbol 列，例如：
+# sh600000 / sz000001
+# =========================
+def load_universe_from_csv():
+    if not CODE_FILE.exists():
+        raise FileNotFoundError(f"股票池文件不存在：{CODE_FILE}")
 
-    # -----------------------------
-    # 展示区
-    # -----------------------------
-    st.subheader("计算结果")
+    df = pd.read_csv(CODE_FILE)
 
-    top1, top2, top3, top4 = st.columns(4)
-    top1.metric("总销售价", f"¥ {total_sale_price:.2f}")
-    top2.metric("总成本", f"¥ {total_cost:.2f}")
-    top3.metric("利润", f"¥ {profit:.2f}")
-    top4.metric("利润率", f"{profit_rate:.2%}")
+    if "symbol" not in df.columns:
+        raise ValueError("代码文件里没有 symbol 列")
 
-    st.subheader("明细拆分")
+    out = df[["symbol"]].copy()
+    out["symbol"] = out["symbol"].astype(str).str.strip()
+    out = out[out["symbol"].str.startswith(("sh", "sz"))].copy()
+    out = out.drop_duplicates("symbol").reset_index(drop=True)
+    out["name"] = out["symbol"]
 
-    left, right = st.columns(2)
+    # 过滤 ST 股票
+    st_codes = load_st_symbols()
+    out["code6"] = out["symbol"].str[-6:]
+    before_cnt = len(out)
+    out = out[~out["code6"].isin(st_codes)].copy()
+    after_cnt = len(out)
 
-    with left:
-        st.markdown("### 销售端")
-        st.write(f"品种：{category}")
-        st.write(f"销售手工费 / 克：¥ {sale_labor_per_g:.2f}")
-        st.write(f"销售金价总价：¥ {sale_gold_total:.2f}")
-        st.write(f"销售手工费总价：¥ {sale_labor_total:.2f}")
-        st.write(f"销售运费：¥ {SALES_SHIPPING:.2f}")
-        st.write(f"证书销售费：¥ {SALES_CERT_FEE:.2f}")
-        st.write(f"银链售卖价：¥ {silver_chain_sale:.2f}")
-        st.write(f"编绳售卖价：¥ {braid_sale:.2f}")
-        st.write(f"未税销售合计：¥ {untaxed_sale_total:.2f}")
-        st.write(f"税费：¥ {tax_fee:.2f}")
-        st.write(f"总销售价：¥ {total_sale_price:.2f}")
+    log(f"原始股票池数量：{before_cnt}")
+    log(f"过滤 ST 后数量：{after_cnt}")
 
-    with right:
-        st.markdown("### 成本端")
-        st.write(f"成本手工费 / 克：¥ {COST_LABOR_PER_G:.2f}")
-        st.write(f"成本金价总价：¥ {cost_gold_total:.2f}")
-        st.write(f"成本手工费总价：¥ {cost_labor_total:.2f}")
-        st.write(f"运费成本价：¥ {COST_SHIPPING:.2f}")
-        st.write(f"证书成本价：¥ {COST_CERT_FEE:.2f}")
-        st.write(f"银链成本价：¥ {silver_chain_cost:.2f}")
-        st.write(f"编绳成本价：¥ {braid_cost:.2f}")
-        st.write(f"税费（按你的口径纳入展示）：¥ {tax_fee:.2f}")
-        st.write(f"总成本：¥ {total_cost:.2f}")
+    if TEST_LIMIT is not None:
+        out = out.head(TEST_LIMIT).copy()
+        log(f"TEST_LIMIT 已启用，仅取前 {TEST_LIMIT} 只股票")
 
-    st.subheader("当前公式说明")
-    st.info(
-        "1. 未税销售合计 = 销售金价总额 + 销售手工费总额 + 销售运费 + 证书销售费 + 银链售价（如有） + 编绳售价（如有）\n\n"
-        "2. 总销售价 = 未税销售合计 ÷ (1 - 税率)\n\n"
-        "3. 税费 = 总销售价 × 税率\n\n"
-        "4. 总成本 = 成本金价总额 + 成本手工费总额 + 运费成本价 + 证书成本价 + 银链成本价（如有） + 编绳成本价（如有） + 税费\n\n"
-        "5. 利润 = 总销售价 - 总成本\n\n"
-        "6. 利润率 = 利润 ÷ 总成本"
-    )
+    return out[["symbol", "name"]]
+
+# =========================
+# 你的单只股票扫描逻辑
+# 这里先给一个占位版本，确保 GitHub 流程先跑通
+#
+# 后面你把自己的选股逻辑替换进来即可
+# 返回：
+#   dict  -> 选中，写入结果表
+#   None  -> 未选中
+# =========================
+def scan_one_symbol(symbol, name):
+    # =========
+    # 这里先放一个“演示版占位逻辑”
+    # 每 10 只选 1 只，确保 result.csv 有内容
+    # 你后面把这里替换成真正策略即可
+    # =========
+    code6 = symbol[-6:]
+    if code6.endswith("0"):
+        return {
+            "symbol": symbol,
+            "name": name,
+            "status": "selected",
+            "remark": "demo_selected_for_github_test"
+        }
+    return None
+
+# =========================
+# 主流程
+# =========================
+def main():
+    t0 = time.time()
+
+    # 清空旧日志
+    if LOG_FILE.exists():
+        LOG_FILE.unlink()
+
+    log("========== 开始运行 ==========")
+    log(f"当前脚本路径：{BASE_DIR}")
+    log(f"股票池文件：{CODE_FILE}")
+    log(f"ST 文件：{ST_FILE}")
+    log(f"输出目录：{OUTPUT_DIR}")
+    log(f"TEST_LIMIT：{TEST_LIMIT}")
+
+    universe = load_universe_from_csv()
+    total = len(universe)
+    log(f"本次待扫描股票数：{total}")
+
+    results = []
+    failed = []
+
+    for i, row in universe.iterrows():
+        symbol = row["symbol"]
+        name = row["name"]
+
+        if (i + 1) % 10 == 0 or i == 0:
+            log(f"[进度] {i + 1}/{total} 处理中：{symbol}")
+
+        try:
+            ret = scan_one_symbol(symbol, name)
+            if ret is not None:
+                results.append(ret)
+        except Exception as e:
+            failed.append({
+                "symbol": symbol,
+                "name": name,
+                "error": repr(e)
+            })
+            log(f"[失败] {symbol} -> {repr(e)}")
+
+    result_df = pd.DataFrame(results)
+    failed_df = pd.DataFrame(failed)
+
+    if result_df.empty:
+        result_df = pd.DataFrame(columns=["symbol", "name", "status", "remark"])
+    if failed_df.empty:
+        failed_df = pd.DataFrame(columns=["symbol", "name", "error"])
+
+    result_df.to_csv(RESULT_FILE, index=False, encoding="utf-8-sig")
+    failed_df.to_csv(FAILED_FILE, index=False, encoding="utf-8-sig")
+
+    elapsed = time.time() - t0
+    summary = [
+        "========== 运行摘要 ==========",
+        f"股票池总数：{total}",
+        f"选中数量：{len(result_df)}",
+        f"失败数量：{len(failed_df)}",
+        f"耗时秒数：{elapsed:.2f}",
+        f"结果文件：{RESULT_FILE.name}",
+        f"失败文件：{FAILED_FILE.name}",
+        f"日志文件：{LOG_FILE.name}",
+    ]
+    with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(summary))
+
+    for line in summary:
+        log(line)
+
+    log("========== 运行结束 ==========")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write("\n========== 程序异常退出 ==========\n")
+            f.write(traceback.format_exc())
+            f.write("\n")
+        raise
