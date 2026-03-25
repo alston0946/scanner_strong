@@ -2,6 +2,10 @@ name: stock-scan
 
 on:
   workflow_dispatch:
+  schedule:
+    # UTC 时间
+    # 例如：每天 UTC 23:30 运行 = 北京/东京次日 08:30
+    - cron: "30 23 * * *"
 
 jobs:
   run-scan:
@@ -27,7 +31,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Prepare output directory
-        run: mkdir -p output
+        run: |
+          rm -f output
+          mkdir -p output
 
       - name: Run scanner
         run: python scanner.py
