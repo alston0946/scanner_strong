@@ -21,7 +21,7 @@ os.environ.pop("https_proxy", None)
 
 
 # =========================
-# 基础路径（GitHub Actions / 本地通用）
+# 基础路径
 # =========================
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -31,10 +31,24 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 CODE_FILE = DATA_DIR / "a_share_codes_for_akshare.csv"
 ST_FILE = DATA_DIR / "st_stocks.csv"
 
-OUTPUT_FILE = OUTPUT_DIR / "strong_surge_pullback_final.csv"
-FAILED_FILE = OUTPUT_DIR / "strong_surge_pullback_final_failed.csv"
-LOG_FILE = OUTPUT_DIR / "run_log.txt"
-SUMMARY_FILE = OUTPUT_DIR / "summary.txt"
+
+# =========================
+# 批次参数（由 GitHub Actions 传入）
+# BATCH_TOTAL=2
+# BATCH_INDEX=0 或 1
+# =========================
+BATCH_TOTAL = int(os.getenv("BATCH_TOTAL", "1"))
+BATCH_INDEX = int(os.getenv("BATCH_INDEX", "0"))
+
+if BATCH_INDEX < 0 or BATCH_INDEX >= BATCH_TOTAL:
+    raise ValueError(f"BATCH_INDEX 非法: {BATCH_INDEX}, BATCH_TOTAL={BATCH_TOTAL}")
+
+BATCH_TAG = f"batch_{BATCH_INDEX}_of_{BATCH_TOTAL}"
+
+OUTPUT_FILE = OUTPUT_DIR / f"strong_surge_pullback_final_{BATCH_TAG}.csv"
+FAILED_FILE = OUTPUT_DIR / f"strong_surge_pullback_final_failed_{BATCH_TAG}.csv"
+LOG_FILE = OUTPUT_DIR / f"run_log_{BATCH_TAG}.txt"
+SUMMARY_FILE = OUTPUT_DIR / f"summary_{BATCH_TAG}.txt"
 
 
 # =========================
@@ -42,10 +56,7 @@ SUMMARY_FILE = OUTPUT_DIR / "summary.txt"
 # =========================
 START_DATE = "20241001"
 
-# 定时任务时可通过环境变量传入 TARGET_DATE，例如 2026-03-26
-# 若不传，则默认取“今天”
 TARGET_DATE_ENV = os.getenv("TARGET_DATE", "").strip()
-
 if TARGET_DATE_ENV:
     TARGET_DATE = pd.Timestamp(TARGET_DATE_ENV)
 else:
@@ -53,9 +64,12 @@ else:
 
 END_DATE = TARGET_DATE.strftime("%Y%m%d")
 
+# 每个 batch 内部的线程数
 MAX_WORKERS = 1
-SLEEP_MIN = 0.3
-SLEEP_MAX = 0.8
+
+# 适当降低 sleep，减少总耗时
+SLEEP_MIN = 0.05
+SLEEP_MAX = 0.15
 
 # 调试时可设 100；全量时改成 None
 TEST_LIMIT = None
@@ -68,27 +82,20 @@ MA_SHORT = 20
 MA_MID = 30
 MA_LONG = 60
 
-# 回调：2天 <= 回调天数 <= 7天
 MIN_PULLBACK_DAYS = 2
 MAX_PULLBACK_DAYS = 7
 
-# 回调幅度：5% <= 回调幅度 <= 12%
 MIN_PULLBACK_PCT = 0.05
 MAX_PULLBACK_PCT = 0.12
 
-# 回调最多允许 1 天收盘略破 20 日线
 MAX_BREAK_MA20_DAYS = 1
 
-# 上冲阶段
 IMPULSE_LOOKBACK = 25
-MIN_IMPULSE_RISE_PCT = 0.08     # 上冲累计涨幅 >= 8%
+MIN_IMPULSE_RISE_PCT = 0.08
 MIN_IMPULSE_DAYS = 4
-MAX_IMPULSE_DRAWDOWN_PCT = 0.05 # 上冲过程中最大回撤 < 5%
+MAX_IMPULSE_DRAWDOWN_PCT = 0.05
 
-# 上冲高点必须是此前近50个交易日收盘新高
 PEAK_NEW_HIGH_LOOKBACK = 50
-
-# 回调阶段内部最大反弹 < 4%
 MAX_PULLBACK_REBOUND_PCT = 0.04
 
 
@@ -121,9 +128,6 @@ def pct_change(a, b):
 
 
 def standardize_hist_tx(df):
-    """
-    统一 stock_zh_a_hist_tx 返回列名
-    """
     rename_map = {}
 
     for col in df.columns:
@@ -138,33 +142,33 @@ def standardize_hist_tx(df):
             rename_map[col] = "high"
         elif c in ["low", "最低"]:
             rename_map[col] = "low"
-        elif c in ["volume", "成交量"]:
+        elif c in ["volume", "vol", "成交量"]:
             rename_map[col] = "volume"
         elif c in ["amount", "成交额"]:
             rename_map[col] = "amount"
 
-    df = df.rename(columns=rename_map).copy()
+    out = df.rename(columns=rename_map).copy()
 
-    need_cols = ["date", "open", "close", "high", "low"]
-    for c in need_cols:
-        if c not in df.columns:
-            raise ValueError(f"缺少字段: {c}，原始列: {list(df.columns)}")
+    if "date" not in out.columns or "close" not in out.columns:
+        raise ValueError(f"hist_tx 缺少 date/close 列, 实际列: {list(df.columns)}")
 
-    df["date"] = safe_to_datetime(df["date"])
-    df = df.dropna(subset=["date"]).copy()
+    out["date"] = safe_to_datetime(out["date"])
+    out["close"] = pd.to_numeric(out["close"], errors="coerce")
 
-    for c in ["open", "close", "high", "low", "volume", "amount"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in ["open", "high", "low", "volume", "amount"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
 
-    df = df.sort_values("date").reset_index(drop=True)
-    return df
+    out = out.dropna(subset=["date", "close"]).copy()
+    out = out.sort_values("date").reset_index(drop=True)
+    return out
 
 
 def calc_ma(df, windows=(20, 30, 60)):
+    out = df.copy()
     for w in windows:
-        df[f"ma{w}"] = df["close"].rolling(w).mean()
-    return df
+        out[f"ma{w}"] = out["close"].rolling(w).mean()
+    return out
 
 
 def load_st_symbols():
@@ -183,18 +187,14 @@ def load_st_symbols():
         return set()
 
     if "ticker" not in df.columns:
-        raise ValueError(f"ST 文件里没有 ticker 列，当前列：{list(df.columns)}")
+        raise ValueError(f"ST 文件里没有 ticker 列，实际列名: {list(df.columns)}")
 
     s = df["ticker"].astype(str).str.strip().str.zfill(6)
     st_codes = set(s.dropna().tolist())
-    log("ST 股票数量:", len(st_codes))
     return st_codes
 
 
 def load_universe_from_csv():
-    if not CODE_FILE.exists():
-        raise FileNotFoundError(f"代码文件不存在：{CODE_FILE}")
-
     df = pd.read_csv(CODE_FILE)
 
     if "symbol" not in df.columns:
@@ -206,21 +206,28 @@ def load_universe_from_csv():
     out = out.drop_duplicates("symbol").reset_index(drop=True)
     out["name"] = out["symbol"]
 
-    # 过滤 ST 股票
     st_codes = load_st_symbols()
     out["code6"] = out["symbol"].str[-6:]
-    raw_n = len(out)
     out = out[~out["code6"].isin(st_codes)].copy()
-    after_n = len(out)
-
-    log("原始股票池数量:", raw_n)
-    log("过滤 ST 后数量:", after_n)
 
     if TEST_LIMIT is not None:
         out = out.head(TEST_LIMIT).copy()
-        log("TEST_LIMIT 已启用，仅取前", TEST_LIMIT, "只股票")
 
-    return out[["symbol", "name"]]
+    out = out[["symbol", "name"]].reset_index(drop=True)
+    return out
+
+
+def split_universe_for_batch(universe: pd.DataFrame, batch_total: int, batch_index: int) -> pd.DataFrame:
+    """
+    把 universe 均匀切成 batch_total 份，当前 job 只跑其中一份
+    """
+    n = len(universe)
+    if n == 0:
+        return universe.copy()
+
+    start = n * batch_index // batch_total
+    end = n * (batch_index + 1) // batch_total
+    return universe.iloc[start:end].reset_index(drop=True)
 
 
 def fetch_hist_tx_with_retry(symbol, start_date, end_date, max_retry=3):
@@ -245,9 +252,6 @@ def fetch_hist_tx_with_retry(symbol, start_date, end_date, max_retry=3):
 
 
 def find_recent_peak_and_pullback(df):
-    """
-    在最近 MAX_PULLBACK_DAYS + 1 根K线里找最近高点，并识别从高点到今天的回调
-    """
     if len(df) < MAX_PULLBACK_DAYS + 2:
         return None
 
@@ -278,10 +282,6 @@ def find_recent_peak_and_pullback(df):
 
 
 def find_impulse_start(df, peak_idx):
-    """
-    在 peak_idx 之前 IMPULSE_LOOKBACK 天内找上冲起点
-    用窗口内最低收盘近似作为起点
-    """
     left = max(0, peak_idx - IMPULSE_LOOKBACK)
     right = peak_idx - 1
 
@@ -310,14 +310,10 @@ def is_peak_new_high(df, peak_idx, lookback=PEAK_NEW_HIGH_LOOKBACK):
 
     peak_close = df.loc[peak_idx, "close"]
     prev_max_close = prev_seg["close"].max()
-
     return peak_close > prev_max_close
 
 
 def calc_max_drawdown_in_segment(df, start_idx, end_idx):
-    """
-    计算 start_idx 到 end_idx 这段收盘价序列内部的最大回撤
-    """
     seg = df.iloc[start_idx:end_idx + 1].copy()
     if seg.empty or len(seg) < 2:
         return np.nan
@@ -337,10 +333,6 @@ def calc_max_drawdown_in_segment(df, start_idx, end_idx):
 
 
 def calc_max_rebound_in_segment(df, start_idx, end_idx):
-    """
-    计算 start_idx 到 end_idx 这段收盘价序列内部的最大反弹幅度
-    用“从某个局部低点向后反弹到更高收盘”的最大涨幅来衡量。
-    """
     seg = df.iloc[start_idx:end_idx + 1].copy()
     if seg.empty or len(seg) < 2:
         return np.nan
@@ -361,8 +353,6 @@ def calc_max_rebound_in_segment(df, start_idx, end_idx):
 
 def evaluate_one_stock(symbol, name):
     try:
-        time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
-
         df = fetch_hist_tx_with_retry(symbol, START_DATE, END_DATE, max_retry=3)
         df = standardize_hist_tx(df)
         df = df[df["date"] <= TARGET_DATE].copy()
@@ -379,7 +369,6 @@ def evaluate_one_stock(symbol, name):
         last = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # 1) 均线条件
         if pd.isna(last[f"ma{MA_LONG}"]) or pd.isna(prev[f"ma{MA_LONG}"]):
             return {"symbol": symbol, "name": name, "error": "ma60 nan"}
 
@@ -392,21 +381,18 @@ def evaluate_one_stock(symbol, name):
         if not cond_ma:
             return {"symbol": symbol, "name": name, "error": "ma condition fail"}
 
-        # 2) 最近回调
         peak_info = find_recent_peak_and_pullback(df)
         if peak_info is None:
             return {"symbol": symbol, "name": name, "error": "no recent pullback"}
 
         peak_idx, pullback_days, pullback_pct = peak_info
 
-        # 3) 回调幅度：5% <= 回调幅度 <= 12%
         if pullback_pct < MIN_PULLBACK_PCT:
             return {"symbol": symbol, "name": name, "error": "pullback too small"}
 
         if pullback_pct > MAX_PULLBACK_PCT:
             return {"symbol": symbol, "name": name, "error": "pullback too deep"}
 
-        # 4) 上冲高点必须是近50个交易日新高
         if not is_peak_new_high(df, peak_idx, PEAK_NEW_HIGH_LOOKBACK):
             return {"symbol": symbol, "name": name, "error": "peak not 50d new high"}
 
@@ -414,12 +400,10 @@ def evaluate_one_stock(symbol, name):
         if pullback_df.empty:
             return {"symbol": symbol, "name": name, "error": "pullback empty"}
 
-        # 5) 回调不明显破20日线
         break_days = (pullback_df["close"] < pullback_df[f"ma{MA_SHORT}"]).sum()
         if break_days > MAX_BREAK_MA20_DAYS:
             return {"symbol": symbol, "name": name, "error": "break ma20 in pullback"}
 
-        # 6) 回调阶段内部最大反弹不能太大
         pullback_max_rebound = calc_max_rebound_in_segment(df, peak_idx, len(df) - 1)
         if pd.isna(pullback_max_rebound):
             return {"symbol": symbol, "name": name, "error": "pullback rebound nan"}
@@ -427,7 +411,6 @@ def evaluate_one_stock(symbol, name):
         if pullback_max_rebound >= MAX_PULLBACK_REBOUND_PCT:
             return {"symbol": symbol, "name": name, "error": "pullback too choppy"}
 
-        # 7) 找上冲起点
         impulse_start_idx = find_impulse_start(df, peak_idx)
         if impulse_start_idx is None:
             return {"symbol": symbol, "name": name, "error": "no impulse start"}
@@ -436,27 +419,27 @@ def evaluate_one_stock(symbol, name):
         peak_close = df.loc[peak_idx, "close"]
         impulse_rise_pct = pct_change(impulse_start_close, peak_close)
 
-        if pd.isna(impulse_rise_pct):
-            return {"symbol": symbol, "name": name, "error": "impulse rise nan"}
-
-        if impulse_rise_pct < MIN_IMPULSE_RISE_PCT:
+        if pd.isna(impulse_rise_pct) or impulse_rise_pct < MIN_IMPULSE_RISE_PCT:
             return {"symbol": symbol, "name": name, "error": "impulse rise too small"}
 
-        # 8) 上冲过程中最大回撤不能太大
         impulse_max_dd = calc_max_drawdown_in_segment(df, impulse_start_idx, peak_idx)
         if pd.isna(impulse_max_dd):
             return {"symbol": symbol, "name": name, "error": "impulse drawdown nan"}
 
         if impulse_max_dd >= MAX_IMPULSE_DRAWDOWN_PCT:
-            return {"symbol": symbol, "name": name, "error": "impulse too choppy"}
+            return {"symbol": symbol, "name": name, "error": "impulse drawdown too large"}
+
+        time.sleep(random.uniform(SLEEP_MIN, SLEEP_MAX))
 
         return {
             "symbol": symbol,
             "name": name,
+            "date": df.iloc[-1]["date"].strftime("%Y-%m-%d"),
 
-            "target_date": TARGET_DATE.strftime("%Y-%m-%d"),
-            "last_date": df.loc[len(df) - 1, "date"].strftime("%Y-%m-%d"),
-            "last_close": round(df.loc[len(df) - 1, "close"], 4),
+            "close": round(last["close"], 4),
+            "ma20": round(last[f"ma{MA_SHORT}"], 4),
+            "ma30": round(last[f"ma{MA_MID}"], 4),
+            "ma60": round(last[f"ma{MA_LONG}"], 4),
 
             "peak_date": df.loc[peak_idx, "date"].strftime("%Y-%m-%d"),
             "peak_close": round(peak_close, 4),
@@ -475,51 +458,33 @@ def evaluate_one_stock(symbol, name):
         return {"symbol": symbol, "name": name, "error": str(e)}
 
 
-def write_summary(universe_count, matched_count, failed_count, error_counter):
-    lines = [
-        "========== 运行摘要 ==========",
-        f"TARGET_DATE: {TARGET_DATE.strftime('%Y-%m-%d')}",
-        f"END_DATE: {END_DATE}",
-        f"股票池总数: {universe_count}",
-        f"命中数量: {matched_count}",
-        f"失败/未命中数量: {failed_count}",
-        f"结果文件: {OUTPUT_FILE.name}",
-        f"失败文件: {FAILED_FILE.name}",
-        f"日志文件: {LOG_FILE.name}",
-        "",
-        "========== 失败原因统计 =========="
-    ]
-
-    for k, v in sorted(error_counter.items(), key=lambda x: (-x[1], x[0])):
-        lines.append(f"{k}: {v}")
-
-    with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-
-
 def main():
     reset_log()
 
     log("========== 开始运行 ==========")
-    log("当前脚本路径:", BASE_DIR)
+    log("BATCH_TOTAL:", BATCH_TOTAL)
+    log("BATCH_INDEX:", BATCH_INDEX)
+    log("BATCH_TAG:", BATCH_TAG)
     log("股票池文件:", CODE_FILE)
     log("ST 文件:", ST_FILE)
     log("输出目录:", OUTPUT_DIR)
     log("TARGET_DATE:", TARGET_DATE.strftime("%Y-%m-%d"))
     log("END_DATE:", END_DATE)
     log("MAX_WORKERS:", MAX_WORKERS)
-    log("TEST_LIMIT:", TEST_LIMIT)
 
     log("\n1) 读取本地全市场股票列表（已过滤ST）...")
-    universe = load_universe_from_csv()
-    log("股票总数:", len(universe))
+    universe_all = load_universe_from_csv()
+    log("全量股票总数:", len(universe_all))
+
+    universe = split_universe_for_batch(universe_all, BATCH_TOTAL, BATCH_INDEX)
+    log("当前批次股票数:", len(universe))
     log(universe.head())
 
     matched = []
     failed = []
     error_counter = {}
 
-    log("\n2) 开始全市场扫描...")
+    log("\n2) 开始当前批次扫描...")
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_map = {
             executor.submit(
@@ -565,19 +530,24 @@ def main():
     else:
         log("\n没有筛到符合条件的股票。")
         pd.DataFrame(columns=[
-            "symbol", "name", "target_date", "last_date", "last_close",
+            "symbol", "name", "date", "close", "ma20", "ma30", "ma60",
             "peak_date", "peak_close", "pullback_days", "pullback_pct",
             "break_ma20_days", "pullback_max_rebound_pct",
             "impulse_start_date", "impulse_start_close",
             "impulse_rise_pct", "impulse_max_drawdown_pct"
         ]).to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
 
-    write_summary(
-        universe_count=len(universe),
-        matched_count=len(matched),
-        failed_count=len(failed),
-        error_counter=error_counter
-    )
+    with open(SUMMARY_FILE, "w", encoding="utf-8") as f:
+        f.write(f"BATCH_TOTAL: {BATCH_TOTAL}\n")
+        f.write(f"BATCH_INDEX: {BATCH_INDEX}\n")
+        f.write(f"BATCH_TAG: {BATCH_TAG}\n")
+        f.write(f"TARGET_DATE: {TARGET_DATE.strftime('%Y-%m-%d')}\n")
+        f.write(f"全量股票总数: {len(universe_all)}\n")
+        f.write(f"当前批次股票数: {len(universe)}\n")
+        f.write(f"命中数量: {len(matched)}\n")
+        f.write(f"失败/未命中数量: {len(failed)}\n")
+        f.write(f"结果文件: {OUTPUT_FILE.name}\n")
+        f.write(f"失败文件: {FAILED_FILE.name}\n")
 
     log("\n摘要文件已保存:", SUMMARY_FILE)
     log("========== 运行结束 ==========")
