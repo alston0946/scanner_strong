@@ -3,13 +3,20 @@ name: stock-scan
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 17 * * *"
-      timezone: "Asia/Shanghai"
+    - cron: "0 9 * * *"
 
 jobs:
   run-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        batch_index: [0, 1]
+
+    env:
+      BATCH_TOTAL: 2
+      BATCH_INDEX: ${{ matrix.batch_index }}
 
     steps:
       - name: Checkout repository
@@ -32,15 +39,111 @@ jobs:
       - name: Prepare output directory
         run: mkdir -p output
 
-      - name: Run scanner
+      - name: Run scanner for this batch
         run: python scanner.py
 
-      - name: Upload outputs
+      - name: Upload batch outputs
         uses: actions/upload-artifact@v4
         with:
-          name: stock-scan-results
+          name: stock-scan-results-batch-${{ matrix.batch_index }}
           path: |
             output/*.csv
             output/*.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  merge-results:
+    needs: run-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download all batch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge batch csv files
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd
+
+          base = Path("artifacts")
+          output_dir = Path("merged_output")
+          output_dir.mkdir(exist_ok=True)
+
+          result_files = sorted(base.glob("**/strong_surge_pullback_final_batch_*.csv"))
+          failed_files = sorted(base.glob("**/strong_surge_pullback_final_failed_batch_*.csv"))
+          summary_files = sorted(base.glob("**/summary_batch_*.txt"))
+          log_files = sorted(base.glob("**/run_log_batch_*.txt"))
+
+          def merge_csv(files, out_file, sort_for_result=False):
+              dfs = []
+              for f in files:
+                  if f.exists() and f.stat().st_size > 0:
+                      try:
+                          df = pd.read_csv(f)
+                          dfs.append(df)
+                      except Exception as e:
+                          print(f"读取失败: {f} -> {e}")
+
+              if dfs:
+                  out = pd.concat(dfs, ignore_index=True)
+                  if sort_for_result and {"impulse_rise_pct", "pullback_pct"}.issubset(out.columns):
+                      out = out.sort_values(
+                          by=["impulse_rise_pct", "pullback_pct"],
+                          ascending=[False, True]
+                      ).reset_index(drop=True)
+              else:
+                  out = pd.DataFrame()
+
+              out.to_csv(out_file, index=False, encoding="utf-8-sig")
+              print(f"已输出: {out_file}")
+
+          merge_csv(
+              result_files,
+              output_dir / "strong_surge_pullback_final.csv",
+              sort_for_result=True
+          )
+          merge_csv(
+              failed_files,
+              output_dir / "strong_surge_pullback_final_failed.csv",
+              sort_for_result=False
+          )
+
+          merged_summary = output_dir / "summary_merged.txt"
+          with open(merged_summary, "w", encoding="utf-8") as f:
+              f.write("Merged summaries\n\n")
+              for sf in summary_files:
+                  f.write(f"===== {sf.name} =====\n")
+                  f.write(sf.read_text(encoding="utf-8", errors="ignore"))
+                  f.write("\n\n")
+
+          merged_log = output_dir / "run_log_merged.txt"
+          with open(merged_log, "w", encoding="utf-8") as f:
+              f.write("Merged logs\n\n")
+              for lf in log_files:
+                  f.write(f"===== {lf.name} =====\n")
+                  f.write(lf.read_text(encoding="utf-8", errors="ignore"))
+                  f.write("\n\n")
+
+          PY
+
+      - name: Upload merged outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-scan-results-merged
+          path: |
+            merged_output/*.csv
+            merged_output/*.txt
           if-no-files-found: warn
           retention-days: 7
