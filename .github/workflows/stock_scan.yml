@@ -3,7 +3,7 @@ name: stock-scan
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 17 * * *"
+    - cron: "0 16 * * *"
       timezone: "Asia/Shanghai"
 jobs:
   run-scan:
