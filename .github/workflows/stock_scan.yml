@@ -34,15 +34,7 @@ jobs:
       - name: Run scanner
         run: python scanner.py
 
-      - name: Send result email
-        if: success()
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: python send_email.py
+
 
       - name: Upload outputs
         uses: actions/upload-artifact@v4
