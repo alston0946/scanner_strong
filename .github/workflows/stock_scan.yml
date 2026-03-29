@@ -51,6 +51,7 @@ jobs:
             output/*.txt
           if-no-files-found: warn
           retention-days: 7
+
   merge-results:
     needs: run-scan
     runs-on: ubuntu-latest
@@ -141,6 +142,16 @@ jobs:
                   f.write(lf.read_text(encoding="utf-8", errors="ignore"))
                   f.write("\n\n")
           PY
+
+      - name: Send merged result email
+        if: success()
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python send_email.py
 
       - name: Upload merged outputs
         uses: actions/upload-artifact@v4
